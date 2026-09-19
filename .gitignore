@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+dist/
+build/
+*.egg-info/
+
+# Relay runtime state & logs
+state/
+*.log
+
+# Telegram session credentials & local environment
+*.session
+*.session-journal
+.env
+
+# Pytest & IDE
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/

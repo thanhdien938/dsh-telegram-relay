@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dsh-telegram-relay"
+version = "0.1.0-beta.1"
+description = "GitHub Issues ↔ Telegram companion relay for DSH, with durable dispatch and result correlation."
+readme = "README.md"
+authors = [{ name = "DSH Contributors" }]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "mcp>=1.0.0",
+    "jsonschema>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["relay"]

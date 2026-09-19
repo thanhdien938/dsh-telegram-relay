@@ -1,0 +1,44 @@
+name: DSH Telegram Relay - Versioned Dispatch
+
+# Triggered ONLY on issue opened (not edited)
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dsh-relay-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  relay-v3:
+    runs-on: [self-hosted, windows, dsh-relay]
+
+    # Defense-in-depth gate: author check and title prefix.
+    # The Python relay layer (contract_v3.py / dispatch_v3.py) validates author independently
+    # and fails closed if unconfigured or unauthorized.
+    if: contains(vars.DSH_RELAY_ALLOWED_GITHUB_USERS, github.event.issue.user.login) && (startsWith(github.event.issue.title, '[DSH-TASK]') || startsWith(github.event.issue.title, '[P18-W3-CANARY]'))
+
+    steps:
+      - name: Checkout relay code
+        uses: actions/checkout@v4
+
+      - name: Invoke relay entrypoint
+        # Strict security: Only the numeric issue number and repo name are passed via env.
+        # Issue body is fetched and parsed securely inside dispatch_v3.py.
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          DSH_RELAY_ALLOWED_GITHUB_USERS: ${{ vars.DSH_RELAY_ALLOWED_GITHUB_USERS }}
+          DSH_RELAY_TELEGRAM_TARGET: ${{ vars.DSH_RELAY_TELEGRAM_TARGET }}
+          DSH_RELAY_TELEGRAM_MCP_EXE: ${{ vars.DSH_RELAY_TELEGRAM_MCP_EXE }}
+          DSH_RELAY_STATE_DIR: ${{ vars.DSH_RELAY_STATE_DIR || 'state' }}
+          DSH_RELAY_PYTHON_EXE: ${{ vars.DSH_RELAY_PYTHON_EXE || 'python' }}
+          TELEGRAM_ENV_PATH: ${{ secrets.TELEGRAM_ENV_PATH }}
+        run: |
+          $pythonExe = if ($env:DSH_RELAY_PYTHON_EXE) { $env:DSH_RELAY_PYTHON_EXE } else { "python" }
+          & $pythonExe "relay\dispatch_v3.py" --repo "$env:REPO_FULL_NAME" --issue "$env:ISSUE_NUMBER"
