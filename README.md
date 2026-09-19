@@ -19,7 +19,7 @@ dsh-cross-model + dsh-telegram-relay
 USER PRIVATE DEPLOYMENT:
 Your own PRIVATE relay control repo
         ↓ (Typed GitHub Issues opened by authorized owners)
-Self-Hosted Runner (Windows / Linux)
+Self-Hosted Runner (Official Baseline: Windows)
         ↓ (Invokes relay/dispatch_v3.py entrypoint)
 Telegram MCP Client (Local stdio JSON-RPC)
         ↓ (Encrypted MTProto transport)
@@ -42,8 +42,9 @@ Terminal Result Comment posted back to GitHub Issue
 Key security layers enforced by the relay:
 
 1. **Defense-in-Depth Author Authorization**:
-   - Both the GitHub Actions workflow `if:` condition AND the authoritative Python contract gate (`contract_v3.py`) enforce the configured allowlist (`DSH_RELAY_ALLOWED_GITHUB_USERS`).
-   - Fails closed if no authorized users are configured or if wildcards (`*`) are provided.
+   - Both the GitHub Actions workflow `if:` condition AND the authoritative Python contract gate (`contract_v3.py`) enforce the configured allowlist (`DSH_RELAY_ALLOWED_GITHUB_USERS_JSON`).
+   - Uses exact JSON array matching (`contains(fromJson(...), github.event.issue.user.login)`) rather than substring matching to eliminate authorization bypass vulnerabilities (e.g. username `alice` cannot be triggered by `malice`). Usernames are matched exactly and are case-sensitive to match GitHub's login format.
+   - Fails closed if no authorized users are configured, if the JSON array is malformed, or if wildcards (`*`) are provided.
 2. **Untrusted Data Boundary**:
    - Issue text is **never** passed as shell arguments or interpolated into PowerShell/Bash commands.
    - Only numeric issue numbers and repository identifiers are passed via environment variables.
@@ -63,13 +64,17 @@ Key security layers enforced by the relay:
 
 ---
 
-## Prerequisites
+## Prerequisites & Platform Support
+
+> [!NOTE]
+> **OFFICIAL DEPLOYMENT BASELINE: Windows Self-Hosted Runner**
+> The relay Python code and unit test suite are cross-platform and validated on both Windows and Linux in CI. However, the provided production deployment workflow template (`templates/workflows/relay-v3.yml`) is specifically authored for a **Windows self-hosted runner** (utilizing PowerShell shell execution). A Linux deployment template may be added in a later release.
 
 1. **DSH Core Runtime**: Installed and operational with Telegram owner transport enabled (see [dsh-cross-model](https://github.com/thanhdien938/dsh-cross-model)).
 2. **Python 3.10+**: Installed on your runner machine.
 3. **Telegram MCP (`telegram-mcp`)**: An MCP server providing Telegram MTProto client tools (`send_message`, `get_history`).
 4. **GitHub CLI (`gh`)**: Installed and authenticated on the runner machine (`gh auth login`).
-5. **Self-Hosted GitHub Actions Runner**: Configured on Windows (or Linux) with access to Telegram MCP and Python.
+5. **Self-Hosted GitHub Actions Runner**: Windows runner machine configured with labels `self-hosted`, `windows`, and `dsh-relay` (or a custom runner label configured via `vars.DSH_RELAY_RUNNER_LABEL`).
 
 ---
 
@@ -106,8 +111,8 @@ telegram-mcp-auth
 ### Step 3: Register a Self-Hosted Runner
 
 1. In your private relay control repository, go to **Settings** -> **Actions** -> **Runners** -> **New self-hosted runner**.
-2. Download and configure the runner on your machine.
-3. Assign the runner label: `dsh-relay` (or a custom label of your choice).
+2. Select **Windows** as the runner OS. Download and configure the runner on your machine.
+3. By default, the workflow template requests labels `self-hosted`, `windows`, and `dsh-relay`. If you wish to use a custom label, assign it to the runner and configure `DSH_RELAY_RUNNER_LABEL` in repository variables (Step 4).
 4. Start the runner service.
 
 ### Step 4: Configure Repository Variables
@@ -116,12 +121,13 @@ In your private control repository, go to **Settings** -> **Secrets and variable
 
 | Variable Name | Description | Example |
 |---|---|---|
-| `DSH_RELAY_ALLOWED_GITHUB_USERS` | Comma-separated list of authorized GitHub usernames | `your-github-handle` |
-| `DSH_RELAY_TELEGRAM_TARGET` | Pinned Telegram bot username for your DSH bot | `your_dsh_bot` |
-| `DSH_RELAY_RUNNER_LABEL` | (Optional) Runner label | `dsh-relay` |
-| `DSH_RELAY_TELEGRAM_MCP_EXE` | (Optional) Path to `telegram-mcp.exe` | `C:\path\to\.venv\Scripts\telegram-mcp.exe` |
-| `DSH_RELAY_PYTHON_EXE` | (Optional) Path to Python executable | `C:\path\to\.venv\Scripts\python.exe` |
-| `DSH_RELAY_STATE_DIR` | (Optional) Directory for durable state files | `state` |
+| `DSH_RELAY_ALLOWED_GITHUB_USERS_JSON` | **Required.** JSON array of authorized GitHub usernames (exact match, case-sensitive) | `["your-github-handle"]` |
+| `DSH_RELAY_TELEGRAM_TARGET` | **Required.** Pinned Telegram bot username for your DSH bot | `your_dsh_bot` |
+| `DSH_RELAY_RUNNER_LABEL` | *(Optional)* Custom runner label matching `runs-on: [self-hosted, windows, <label>]`. Default: `dsh-relay` | `dsh-relay` |
+| `DSH_RELAY_ALLOWED_GITHUB_USERS` | *(Legacy fallback)* Comma-separated list of authorized usernames | `your-github-handle` |
+| `DSH_RELAY_TELEGRAM_MCP_EXE` | *(Optional)* Path to `telegram-mcp.exe` | `C:\path\to\.venv\Scripts\telegram-mcp.exe` |
+| `DSH_RELAY_PYTHON_EXE` | *(Optional)* Path to Python executable | `C:\path\to\.venv\Scripts\python.exe` |
+| `DSH_RELAY_STATE_DIR` | *(Optional)* Directory for durable state files | `state` |
 
 *(Optional Secret)*: If your `telegram-mcp` session uses an external `.env` file, store its path in repository Secret `TELEGRAM_ENV_PATH`.
 
@@ -251,7 +257,7 @@ task: |
 
 ## Troubleshooting
 
-1. **`UNAUTHORIZED_AUTHOR`**: The issue author does not match `DSH_RELAY_ALLOWED_GITHUB_USERS`. Check repository variables and exact case.
+1. **`UNAUTHORIZED_AUTHOR`**: The issue author does not match `DSH_RELAY_ALLOWED_GITHUB_USERS_JSON`. Verify that your exact GitHub username is listed in the JSON array (case-sensitive, e.g. `["MyUser"]` does not match `myuser`).
 2. **`INVALID_SCHEMA`**: The issue title does not start with `[DSH-TASK]`, or the body YAML is missing required fields.
 3. **`PAYLOAD_MUTATED`**: An accepted issue was edited. Issue bodies cannot be modified after initial dispatch. Open a new issue with a new `correlation_id`.
 4. **`telegram-mcp` connection errors**: Ensure the Telegram session is authenticated (`telegram-mcp-auth`) and `DSH_RELAY_TELEGRAM_MCP_EXE` points to the valid executable.

@@ -148,12 +148,58 @@ def test_wildcard_owner_config_rejected():
 
 
 def test_get_allowed_authors_from_env(monkeypatch):
+    # JSON array canonical format
+    monkeypatch.setenv("DSH_RELAY_ALLOWED_GITHUB_USERS_JSON", '["alice", "bob"]')
+    users = _get_allowed_authors()
+    assert users == {"alice", "bob"}
+
+    # Invalid JSON fails closed (returns empty set)
+    monkeypatch.setenv("DSH_RELAY_ALLOWED_GITHUB_USERS_JSON", '["unclosed_json')
+    assert _get_allowed_authors() == set()
+
+    # Comma-separated fallback
+    monkeypatch.delenv("DSH_RELAY_ALLOWED_GITHUB_USERS_JSON", raising=False)
     monkeypatch.setenv("DSH_RELAY_ALLOWED_GITHUB_USERS", "alice, bob, charlie ")
     users = _get_allowed_authors()
     assert users == {"alice", "bob", "charlie"}
 
     monkeypatch.setenv("DSH_RELAY_ALLOWED_GITHUB_USERS", "")
     assert _get_allowed_authors() == set()
+
+
+def test_exact_author_matching_and_substring_rejection(monkeypatch):
+    monkeypatch.setenv("DSH_RELAY_ALLOWED_GITHUB_USERS_JSON", '["alice", "bob"]')
+    allowed = _get_allowed_authors()
+
+    # Exact author matches
+    p_alice = parse_and_validate("[DSH-TASK] test", VALID_SINGLE_BODY, required_title_prefix="[DSH-TASK]", author="alice", expected_author=allowed)
+    assert p_alice.correlation_id == "gen_test_single_001"
+
+    p_bob = parse_and_validate("[DSH-TASK] test", VALID_SINGLE_BODY, required_title_prefix="[DSH-TASK]", author="bob", expected_author=allowed)
+    assert p_bob.correlation_id == "gen_test_single_001"
+
+    # Substring authors MUST be rejected
+    for sub in ["ali", "al", "alice2", "ice", "bo", "b", "bob2"]:
+        with pytest.raises(ContractError) as excinfo:
+            parse_and_validate("[DSH-TASK] test", VALID_SINGLE_BODY, required_title_prefix="[DSH-TASK]", author=sub, expected_author=allowed)
+        assert excinfo.value.code == UNAUTHORIZED_AUTHOR
+
+
+def test_deployment_template_workflow_static_contract():
+    wf_path = Path(__file__).resolve().parent.parent / "templates" / "workflows" / "relay-v3.yml"
+    assert wf_path.exists(), "Deployment workflow template must exist"
+    content = wf_path.read_text(encoding="utf-8")
+
+    # Prove substring match was removed and exact fromJson match is present
+    assert "contains(vars.DSH_RELAY_ALLOWED_GITHUB_USERS," not in content
+    assert "contains(fromJson(vars.DSH_RELAY_ALLOWED_GITHUB_USERS_JSON), github.event.issue.user.login)" in content
+    assert "!contains(fromJson(vars.DSH_RELAY_ALLOWED_GITHUB_USERS_JSON), '*')" in content
+
+    # Prove runner label is configurable
+    assert "${{ vars.DSH_RELAY_RUNNER_LABEL || 'dsh-relay' }}" in content
+
+    # Prove Windows baseline is explicit
+    assert "windows" in content
 
 
 def test_configured_telegram_target_used(monkeypatch):

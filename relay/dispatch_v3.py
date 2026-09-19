@@ -65,10 +65,27 @@ from contract_v3 import (  # noqa: E402
 )
 
 def _get_allowed_authors() -> set[str]:
-    raw = os.environ.get("DSH_RELAY_ALLOWED_GITHUB_USERS", "").strip()
-    if not raw:
+    json_raw = os.environ.get("DSH_RELAY_ALLOWED_GITHUB_USERS_JSON", "").strip()
+    if json_raw:
+        try:
+            parsed = json.loads(json_raw)
+            if isinstance(parsed, list):
+                return {str(u).strip() for u in parsed if str(u).strip()}
+        except Exception:
+            return set()
         return set()
-    return {u.strip() for u in raw.split(",") if u.strip()}
+
+    csv_raw = os.environ.get("DSH_RELAY_ALLOWED_GITHUB_USERS", "").strip()
+    if not csv_raw:
+        return set()
+    if csv_raw.startswith("[") and csv_raw.endswith("]"):
+        try:
+            parsed = json.loads(csv_raw)
+            if isinstance(parsed, list):
+                return {str(u).strip() for u in parsed if str(u).strip()}
+        except Exception:
+            return set()
+    return {u.strip() for u in csv_raw.split(",") if u.strip()}
 
 REQUIRED_TITLE_PREFIX = (
     os.environ.get("DSH_RELAY_TITLE_PREFIX", "").strip()
