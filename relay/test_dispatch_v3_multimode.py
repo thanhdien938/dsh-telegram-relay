@@ -13,10 +13,13 @@ Run: .venv\\Scripts\\python.exe relay\\test_dispatch_v3_multimode.py
 """
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+
+os.environ.setdefault("DSH_RELAY_TELEGRAM_TARGET", "dsh_test_bot")
 
 from dispatch_v3 import (
     recover_authoritative_task_id, PINNED_BOT,

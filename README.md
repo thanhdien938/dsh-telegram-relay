@@ -55,8 +55,9 @@ Key security layers enforced by the relay:
 4. **Durable Send Idempotency**:
    - State machine (`state_machine.py`) tracks states: `RESERVED`, `SENT`, `COMPLETED`, `FAILED_RETRYABLE`, `FAILED_TERMINAL`.
    - Prevents duplicate dispatches if workflows re-run or restart.
-5. **Destination Pinning**:
+5. **Destination Pinning & Fail-Closed Behavior**:
    - Telegram destination target is hard-pinned via trusted configuration (`DSH_RELAY_TELEGRAM_TARGET`).
+   - Missing, empty, or whitespace-only target configuration fails closed before any Telegram transport call or dispatch reservation occurs. Zero implicit default fallback.
    - Issue bodies cannot specify or override the destination bot, session, or chat ID.
 6. **Causal ACK & Result Correlation**:
    - Recovers authoritative task IDs from post-boundary bot ACKs matching the dispatch correlation ID.
@@ -122,7 +123,7 @@ In your private control repository, go to **Settings** -> **Secrets and variable
 | Variable Name | Description | Example |
 |---|---|---|
 | `DSH_RELAY_ALLOWED_GITHUB_USERS_JSON` | **Required.** JSON array of authorized GitHub usernames (exact match, case-sensitive) | `["your-github-handle"]` |
-| `DSH_RELAY_TELEGRAM_TARGET` | **Required.** Pinned Telegram bot username for your DSH bot | `your_dsh_bot` |
+| `DSH_RELAY_TELEGRAM_TARGET` | **Required.** Pinned Telegram bot username for your DSH bot (fails closed if missing, empty, or whitespace-only) | `your_dsh_bot` |
 | `DSH_RELAY_RUNNER_LABEL` | *(Optional)* Custom runner label matching `runs-on: [self-hosted, windows, <label>]`. Default: `dsh-relay` | `dsh-relay` |
 | `DSH_RELAY_ALLOWED_GITHUB_USERS` | *(Legacy fallback)* Comma-separated list of authorized usernames | `your-github-handle` |
 | `DSH_RELAY_TELEGRAM_MCP_EXE` | *(Optional)* Path to `telegram-mcp.exe` | `C:\path\to\.venv\Scripts\telegram-mcp.exe` |

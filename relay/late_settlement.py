@@ -45,16 +45,25 @@ Guarantees (P18-W4R4 requirements):
 from __future__ import annotations
 
 from typing import Optional
+import os
 
 from result_collector import (
     scan_terminal_candidates, classify,
     PENDING, COMPLETED, FAILED, AMBIGUOUS, TIMEOUT,
     COMPLETED_LATE, FAILED_LATE, LATE_TERMINAL_STATES,
 )
+from target import get_required_telegram_target, TelegramTargetError
 
-import os
 
-PINNED_BOT = os.environ.get("DSH_RELAY_TELEGRAM_TARGET", "dsh_relay_bot").strip().lstrip("@")
+def _get_pinned_bot() -> str:
+    return get_required_telegram_target()
+
+
+def __getattr__(name: str):
+    if name == "PINNED_BOT":
+        return get_required_telegram_target()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 
 NO_ENTRY = "NO_ENTRY"
 ALREADY_LATE_SETTLED = "ALREADY_LATE_SETTLED"
@@ -66,8 +75,10 @@ SETTLED = "SETTLED"
 
 
 def attempt_late_settlement(result_store, repo: str, issue: int, correlation_id: str,
-                             history_payload: dict, bot_username: str = PINNED_BOT, *,
+                             history_payload: dict, bot_username: Optional[str] = None, *,
                              expected_task_id: Optional[str] = None):
+    if bot_username is None:
+        bot_username = get_required_telegram_target()
     """Returns (outcome, entry_or_None, reason).
 
     outcome is one of: NO_ENTRY, ALREADY_LATE_SETTLED, NOT_ELIGIBLE,
@@ -123,7 +134,9 @@ def build_late_settlement_comment(correlation_id: str, entry: dict, *,
                                    task_branch: Optional[str] = None,
                                    result_commit: Optional[str] = None,
                                    published_head: Optional[str] = None,
-                                   bot_username: str = PINNED_BOT) -> str:
+                                   bot_username: Optional[str] = None) -> str:
+    if bot_username is None:
+        bot_username = get_required_telegram_target()
     """task_branch/result_commit/published_head are OPTIONAL and must be
     independently verified by the caller from real DSH/Git state before
     being passed in -- this function never parses them out of Telegram

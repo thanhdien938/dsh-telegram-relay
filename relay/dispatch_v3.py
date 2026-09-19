@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from state_machine import (  # noqa: E402
     DispatchStateStore, TransitionDenied, classify_send_result, FAILED_RETRYABLE, FAILED_TERMINAL,
 )
+from target import get_required_telegram_target, TelegramTargetError  # noqa: E402
 from result_collector import (  # noqa: E402
     ResultStateStore, find_boundary_id, scan_terminal_candidates, classify,
     PENDING, COMPLETED, FAILED, AMBIGUOUS, TIMEOUT,
@@ -93,10 +94,15 @@ REQUIRED_TITLE_PREFIX = (
 )
 
 def _get_pinned_bot() -> str:
-    target = os.environ.get("DSH_RELAY_TELEGRAM_TARGET", "").strip().lstrip("@")
-    return target if target else "dsh_relay_bot"
+    return get_required_telegram_target()
 
-PINNED_BOT = _get_pinned_bot()
+
+def __getattr__(name: str):
+    if name == "PINNED_BOT":
+        return get_required_telegram_target()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
 POLL_INTERVAL_SECONDS = 8
 RESULT_TIMEOUT_SECONDS = 420
 
@@ -185,8 +191,9 @@ class TelegramSession:
         await self._stdio_cm.__aexit__(*exc)
 
 
-async def mcp_get_history(session: ClientSession, limit: int = 20) -> dict:
-    result = await session.call_tool("get_history", {"bot": PINNED_BOT, "limit": limit})
+async def mcp_get_history(session: ClientSession, limit: int = 20, bot: str | None = None) -> dict:
+    target_bot = bot or get_required_telegram_target()
+    result = await session.call_tool("get_history", {"bot": target_bot, "limit": limit})
     return json.loads(result.content[0].text)
 
 
@@ -203,7 +210,7 @@ async def mcp_get_history(session: ClientSession, limit: int = 20) -> dict:
 # already resolves via the fast path with no observed defect, and the
 # boundary snapshot only needs the single highest message id, which the
 # newest-N response always contains regardless of N.
-async def mcp_get_history_boundary_aware(session: ClientSession, boundary_id: int) -> dict:
+async def mcp_get_history_boundary_aware(session: ClientSession, boundary_id: int, bot: str | None = None) -> dict:
     """Escalates through HISTORY_ESCALATION_LIMITS (each one single
     get_history call) until the returned window can be PROVEN to cover
     every message newer than boundary_id, or the bounded escalation
@@ -214,18 +221,20 @@ async def mcp_get_history_boundary_aware(session: ClientSession, boundary_id: in
     which messages are candidates."""
     history: dict = {"messages": []}
     for limit in HISTORY_ESCALATION_LIMITS:
-        history = await mcp_get_history(session, limit=limit)
+        history = await mcp_get_history(session, limit=limit, bot=bot)
         if history_window_covers_boundary(history, boundary_id, limit):
             break
     return history
 
 
-async def mcp_send_message(session: ClientSession, message: str, timeout: int = 45) -> dict:
-    result = await session.call_tool("send_message", {"bot": PINNED_BOT, "message": message, "timeout": timeout})
+async def mcp_send_message(session: ClientSession, message: str, timeout: int = 45, bot: str | None = None) -> dict:
+    target_bot = bot or get_required_telegram_target()
+    result = await session.call_tool("send_message", {"bot": target_bot, "message": message, "timeout": timeout})
     return json.loads(result.content[0].text)
 
 
-def build_dispatched_comment(payload, compiled_header_only: str, task_id: str | None = None) -> str:
+def build_dispatched_comment(payload, compiled_header_only: str, task_id: str | None = None, bot: str | None = None) -> str:
+    target_bot = bot or get_required_telegram_target()
     # P18-W4 Part D: `task_id` is None for every v1 dispatch (v1 never
     # attempts ACK recovery -- unchanged behavior) and for a v2 dispatch
     # where the ACK's task_id could not yet be recovered at comment-post
@@ -235,7 +244,7 @@ def build_dispatched_comment(payload, compiled_header_only: str, task_id: str | 
     lines = [
         "P18-W3 DISPATCHED",
         f"correlation_id: {payload.correlation_id}",
-        f"target: @{PINNED_BOT}",
+        f"target: @{target_bot}",
         f"schema: {schema_version}",
         f"mode: {mode}",
         f"project_id: {payload.project_id}",
@@ -266,7 +275,8 @@ def build_dispatched_comment(payload, compiled_header_only: str, task_id: str | 
 
 
 def build_terminal_comment(correlation_id: str, result_entry: dict, timeout_seconds_used: int = RESULT_TIMEOUT_SECONDS,
-                            mode: str | None = None) -> str:
+                            mode: str | None = None, bot: str | None = None) -> str:
+    target_bot = bot or get_required_telegram_target()
     status = result_entry["status"]
     task_id = result_entry.get("task_id")
     terminal_status = result_entry.get("terminal_status")
@@ -282,7 +292,7 @@ def build_terminal_comment(correlation_id: str, result_entry: dict, timeout_seco
     if terminal_status:
         lines.append(f"terminal_status: {terminal_status}")
     if msg_id:
-        lines.append(f"evidence: matched via Telegram MCP get_history, message id {msg_id} (from @{PINNED_BOT})")
+        lines.append(f"evidence: matched via Telegram MCP get_history, message id {msg_id} (from @{target_bot})")
     elif status == TIMEOUT:
         lines.append("evidence: no exact single terminal match found via Telegram MCP get_history "
                       f"within the {timeout_seconds_used}s collector bound (observation/correlation "
@@ -377,7 +387,9 @@ FAST_PATH_SENTINEL_MESSAGE_ID = -1
 async def recover_authoritative_task_id(session, boundary_id: int, correlation_id: str,
                                          fresh_send_payload: dict | None = None, *,
                                          timeout_seconds: float = ACK_RECOVERY_TIMEOUT_SECONDS,
-                                         poll_interval_seconds: float = ACK_RECOVERY_POLL_INTERVAL_SECONDS) -> tuple[str | None, bool, str]:
+                                         poll_interval_seconds: float = ACK_RECOVERY_POLL_INTERVAL_SECONDS,
+                                         bot: str | None = None) -> tuple[str | None, bool, str]:
+    target_bot = bot or get_required_telegram_target()
     """Returns (task_id_or_None, ambiguous, reason). `timeout_seconds`/
     `poll_interval_seconds` default to the real production bounds --
     overridable only so tests can exercise the "never found within the
@@ -396,8 +408,8 @@ async def recover_authoritative_task_id(session, boundary_id: int, correlation_i
     deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
     poll_count = 0
     while True:
-        history = await mcp_get_history(session, limit=20)
-        candidates = scan_ack_candidates_by_correlation(history, boundary_id, correlation_id, PINNED_BOT)
+        history = await mcp_get_history(session, limit=20, bot=target_bot)
+        candidates = scan_ack_candidates_by_correlation(history, boundary_id, correlation_id, target_bot)
         if fast_candidate is not None and not any(c.task_id == fast_candidate.task_id for c in candidates):
             # Merge, never suppress: a real history sighting of the SAME
             # task_id is just a duplicate delivery of the identical ACK
@@ -428,7 +440,8 @@ async def recover_authoritative_task_id(session, boundary_id: int, correlation_i
 # ---------------------------------------------------------------------------
 
 async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchStateStore,
-               result_store: ResultStateStore) -> int:
+               result_store: ResultStateStore, bot: str | None = None) -> int:
+    target_bot = bot or get_required_telegram_target()
     correlation_id = payload.correlation_id
     # P18-W4: v1 is completely unaffected below -- `is_v2` gates every new
     # behavior (task_id ACK recovery, task_id-based terminal scanning, the
@@ -474,13 +487,13 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
             print("DOUBLE-SEND PROTECTION: PASS (reserved)")
 
         if need_send:
-            history_before = await mcp_get_history(session, limit=20)
+            history_before = await mcp_get_history(session, limit=20, bot=target_bot)
             boundary_id = find_boundary_id(history_before)
             print(f"PRE-DISPATCH BOUNDARY: message id {boundary_id}")
 
             command_text = compile_telegram_command(payload)
             try:
-                send_payload = await mcp_send_message(session, command_text, timeout=45)
+                send_payload = await mcp_send_message(session, command_text, timeout=45, bot=target_bot)
             except Exception as e:  # noqa: BLE001
                 dispatch_store.mark_failed_terminal(repo, issue_number, correlation_id, {"error": str(e)})
                 print(f"TELEGRAM MCP SEND: FAIL (unclassified exception, FAILED_TERMINAL: {e})")
@@ -509,7 +522,7 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
             dispatch_store.mark_sent(repo, issue_number, correlation_id,
                                       {"boundary_id": boundary_id, "send_payload": send_payload})
 
-            gh_comment_issue(repo, issue_number, build_dispatched_comment(payload, compiled_header_only(payload)))
+            gh_comment_issue(repo, issue_number, build_dispatched_comment(payload, compiled_header_only(payload), bot=target_bot))
             print("GITHUB DISPATCHED COMMENT: PASS")
             dispatch_store.mark_completed(repo, issue_number, correlation_id,
                                            {"boundary_id": boundary_id, "dispatched_comment_posted": True})
@@ -527,7 +540,7 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
         task_id: str | None = None
         if result_entry["status"] == PENDING and needs_taskid_correlation:
             task_id, ambiguous, ack_reason = await recover_authoritative_task_id(
-                session, boundary_id, correlation_id, fresh_send_payload=fresh_send_payload,
+                session, boundary_id, correlation_id, fresh_send_payload=fresh_send_payload, bot=target_bot,
             )
             print(f"ACK TASK_ID RECOVERY: {'PASS (task_id=' + task_id + ')' if task_id else ('AMBIGUOUS' if ambiguous else 'FAIL')} ({ack_reason})")
             if ambiguous:
@@ -545,7 +558,7 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
                 # limit=20 -- see mcp_get_history_boundary_aware()'s own
                 # docstring for why this exact call site (and no other) is
                 # the one that needed it.
-                history = await mcp_get_history_boundary_aware(session, boundary_id)
+                history = await mcp_get_history_boundary_aware(session, boundary_id, bot=target_bot)
                 # P18-W4 Part E: v2 scans by exact task_id (no correlation
                 # marker required anywhere in the Result body -- this is
                 # what lets a FAILED/CANCELLED terminal with only a
@@ -558,11 +571,11 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
                 # the generic task_id scan; v1 keeps the correlation-marker
                 # scan, all unchanged.
                 if is_v3:
-                    candidates = scan_terminal_candidates_by_task_id_multimode(history, boundary_id, task_id, PINNED_BOT)
+                    candidates = scan_terminal_candidates_by_task_id_multimode(history, boundary_id, task_id, target_bot)
                 elif is_v2:
-                    candidates = scan_terminal_candidates_by_task_id(history, boundary_id, task_id, PINNED_BOT)
+                    candidates = scan_terminal_candidates_by_task_id(history, boundary_id, task_id, target_bot)
                 else:
-                    candidates = scan_terminal_candidates(history, boundary_id, correlation_id, PINNED_BOT)
+                    candidates = scan_terminal_candidates(history, boundary_id, correlation_id, target_bot)
                 state, cand, reason = classify(candidates)
                 poll_count += 1
                 now = datetime.now(timezone.utc)
@@ -585,7 +598,7 @@ async def run(repo: str, issue_number: int, payload, dispatch_store: DispatchSta
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         if not result_entry.get("comment_posted"):
-            gh_comment_issue(repo, issue_number, build_terminal_comment(correlation_id, result_entry, timeout_seconds_used=timeout_seconds, mode=v3_mode))
+            gh_comment_issue(repo, issue_number, build_terminal_comment(correlation_id, result_entry, timeout_seconds_used=timeout_seconds, mode=v3_mode, bot=target_bot))
             result_store.mark_comment_posted(repo, issue_number, correlation_id)
             print("GITHUB TERMINAL COMMENT: PASS")
         else:
@@ -607,6 +620,12 @@ def main() -> int:
 
     if not args.repo:
         print("CONFIG ERROR: --repo must be provided or GITHUB_REPOSITORY environment variable set")
+        return 1
+
+    try:
+        get_required_telegram_target()
+    except TelegramTargetError as e:
+        print(f"CONFIG ERROR: {e}")
         return 1
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
