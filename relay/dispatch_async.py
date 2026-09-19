@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from state_machine import (  # noqa: E402
     DispatchStateStore, TransitionDenied, classify_send_result, FAILED_RETRYABLE, FAILED_TERMINAL,
 )
+from target import get_required_telegram_target, TelegramTargetError  # noqa: E402
 from result_collector import (  # noqa: E402
     ResultStateStore, find_boundary_id, scan_terminal_candidates, classify,
     PENDING, COMPLETED, FAILED, AMBIGUOUS, TIMEOUT,
@@ -83,7 +84,17 @@ REQUIRED_SCHEMA = "p18-w2-canary/v1"
 REQUIRED_PROBE = "async-task"
 ALLOWED_BODY_FIELDS = {"schema", "probe", "correlation_id"}
 
-PINNED_BOT = os.environ.get("DSH_RELAY_TELEGRAM_TARGET", "dsh_relay_bot").strip().lstrip("@")
+
+def _get_pinned_bot() -> str:
+    return get_required_telegram_target()
+
+
+def __getattr__(name: str):
+    if name == "PINNED_BOT":
+        return get_required_telegram_target()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
 PROJECT_ALIAS = os.environ.get("DSH_RELAY_PROJECT_ALIAS", "2")
 PM_ALIAS = os.environ.get("DSH_RELAY_PM_ALIAS", "1")
 
@@ -229,13 +240,15 @@ class TelegramSession:
         await self._stdio_cm.__aexit__(*exc)
 
 
-async def mcp_get_history(session: ClientSession, limit: int = 20) -> dict:
-    result = await session.call_tool("get_history", {"bot": PINNED_BOT, "limit": limit})
+async def mcp_get_history(session: ClientSession, limit: int = 20, bot: str | None = None) -> dict:
+    target_bot = bot or get_required_telegram_target()
+    result = await session.call_tool("get_history", {"bot": target_bot, "limit": limit})
     return json.loads(result.content[0].text)
 
 
-async def mcp_send_message(session: ClientSession, message: str, timeout: int = 45) -> dict:
-    result = await session.call_tool("send_message", {"bot": PINNED_BOT, "message": message, "timeout": timeout})
+async def mcp_send_message(session: ClientSession, message: str, timeout: int = 45, bot: str | None = None) -> dict:
+    target_bot = bot or get_required_telegram_target()
+    result = await session.call_tool("send_message", {"bot": target_bot, "message": message, "timeout": timeout})
     return json.loads(result.content[0].text)
 
 
@@ -243,17 +256,19 @@ async def mcp_send_message(session: ClientSession, message: str, timeout: int = 
 # Comment builders
 # ---------------------------------------------------------------------------
 
-def build_dispatched_comment(correlation_id: str) -> str:
+def build_dispatched_comment(correlation_id: str, bot: str | None = None) -> str:
+    target_bot = bot or get_required_telegram_target()
     return (
         "P18-W2 DISPATCHED\n"
         f"correlation_id: {correlation_id}\n"
-        f"target: @{PINNED_BOT}\n"
+        f"target: @{target_bot}\n"
         f"project/pm: {PROJECT_ALIAS}-{PM_ALIAS}\n"
         "DSH source/config/schema changes: 0 / 0 / 0\n"
     )
 
 
-def build_terminal_comment(correlation_id: str, result_entry: dict) -> str:
+def build_terminal_comment(correlation_id: str, result_entry: dict, bot: str | None = None) -> str:
+    target_bot = bot or get_required_telegram_target()
     status = result_entry["status"]
     task_id = result_entry.get("task_id")
     terminal_status = result_entry.get("terminal_status")
@@ -265,7 +280,7 @@ def build_terminal_comment(correlation_id: str, result_entry: dict) -> str:
     if terminal_status:
         lines.append(f"terminal_status: {terminal_status}")
     if msg_id:
-        lines.append(f"evidence: matched via Telegram MCP get_history, message id {msg_id} (from @{PINNED_BOT})")
+        lines.append(f"evidence: matched via Telegram MCP get_history, message id {msg_id} (from @{target_bot})")
     else:
         lines.append("evidence: no exact single terminal match found via Telegram MCP get_history "
                       f"within the {RESULT_TIMEOUT_SECONDS}s bound" if status == TIMEOUT
@@ -281,7 +296,8 @@ def build_terminal_comment(correlation_id: str, result_entry: dict) -> str:
 # ---------------------------------------------------------------------------
 
 async def run(repo: str, issue_number: int, correlation_id: str, dispatch_store: DispatchStateStore,
-               result_store: ResultStateStore) -> int:
+               result_store: ResultStateStore, bot: str | None = None) -> int:
+    target_bot = bot or get_required_telegram_target()
     async with TelegramSession() as session:
         boundary_id: int | None = None
         need_send = True
@@ -301,13 +317,13 @@ async def run(repo: str, issue_number: int, correlation_id: str, dispatch_store:
             print("DOUBLE-SEND PROTECTION: PASS (reserved)")
 
         if need_send:
-            history_before = await mcp_get_history(session, limit=20)
+            history_before = await mcp_get_history(session, limit=20, bot=target_bot)
             boundary_id = find_boundary_id(history_before)
             print(f"PRE-DISPATCH BOUNDARY: message id {boundary_id}")
 
             task_text = task_template(correlation_id)
             try:
-                send_payload = await mcp_send_message(session, task_text, timeout=45)
+                send_payload = await mcp_send_message(session, task_text, timeout=45, bot=target_bot)
             except Exception as e:  # noqa: BLE001
                 dispatch_store.mark_failed_terminal(repo, issue_number, correlation_id, {"error": str(e)})
                 print(f"TELEGRAM MCP SEND: FAIL (unclassified exception, FAILED_TERMINAL: {e})")
@@ -328,7 +344,7 @@ async def run(repo: str, issue_number: int, correlation_id: str, dispatch_store:
                                       {"boundary_id": boundary_id, "send_payload": send_payload})
 
             try:
-                gh_comment_issue(repo, issue_number, build_dispatched_comment(correlation_id))
+                gh_comment_issue(repo, issue_number, build_dispatched_comment(correlation_id, bot=target_bot))
                 print("GITHUB DISPATCHED COMMENT: PASS")
             except ValidationError as e:
                 print(f"GITHUB DISPATCHED COMMENT: FAIL ({e}) -- Telegram already delivered, state stays SENT")
@@ -350,8 +366,8 @@ async def run(repo: str, issue_number: int, correlation_id: str, dispatch_store:
             deadline = datetime.fromisoformat(result_entry["deadline"])
             poll_count = 0
             while True:
-                history = await mcp_get_history(session, limit=20)
-                candidates = scan_terminal_candidates(history, boundary_id, correlation_id, PINNED_BOT)
+                history = await mcp_get_history(session, limit=20, bot=target_bot)
+                candidates = scan_terminal_candidates(history, boundary_id, correlation_id, target_bot)
                 state, cand, reason = classify(candidates)
                 poll_count += 1
                 now = datetime.now(timezone.utc)
@@ -373,7 +389,7 @@ async def run(repo: str, issue_number: int, correlation_id: str, dispatch_store:
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         if not result_entry.get("comment_posted"):
-            gh_comment_issue(repo, issue_number, build_terminal_comment(correlation_id, result_entry))
+            gh_comment_issue(repo, issue_number, build_terminal_comment(correlation_id, result_entry, bot=target_bot))
             result_store.mark_comment_posted(repo, issue_number, correlation_id)
             print("GITHUB TERMINAL COMMENT: PASS")
         else:
@@ -394,11 +410,17 @@ def main() -> int:
         print("CONFIG ERROR: --repo must be provided or GITHUB_REPOSITORY environment variable set")
         return 1
 
+    try:
+        pinned_bot = get_required_telegram_target()
+    except TelegramTargetError as e:
+        print(f"CONFIG ERROR: {e}")
+        return 1
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     dispatch_store = DispatchStateStore(DISPATCH_STATE_FILE)
     result_store = ResultStateStore(RESULT_STATE_FILE)
 
-    print(f"TARGET_PINNED: @{PINNED_BOT}")
+    print(f"TARGET_PINNED: @{pinned_bot}")
     try:
         issue = gh_view_issue(args.repo, args.issue)
         print("GITHUB ISSUE READ: PASS")

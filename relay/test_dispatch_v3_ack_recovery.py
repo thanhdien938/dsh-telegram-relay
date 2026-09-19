@@ -37,7 +37,9 @@ AMBIGUOUS" uniqueness invariant.
 import asyncio
 import sys
 import json
+import os
 from types import SimpleNamespace
+os.environ.setdefault("DSH_RELAY_TELEGRAM_TARGET", "dsh_test_bot")
 
 from dispatch_v3 import recover_authoritative_task_id, PINNED_BOT
 from result_collector import ACK_RECOVERY_TIMEOUT_SECONDS

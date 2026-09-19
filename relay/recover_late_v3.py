@@ -44,8 +44,17 @@ from mcp.client.stdio import stdio_client
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from result_collector import ResultStateStore, TIMEOUT, LATE_TERMINAL_STATES  # noqa: E402
 from late_settlement import attempt_late_settlement, build_late_settlement_comment, SETTLED, STILL_PENDING  # noqa: E402
+from target import get_required_telegram_target, TelegramTargetError  # noqa: E402
 
-PINNED_BOT = os.environ.get("DSH_RELAY_TELEGRAM_TARGET", "dsh_relay_bot").strip().lstrip("@")
+
+def _get_pinned_bot() -> str:
+    return get_required_telegram_target()
+
+
+def __getattr__(name: str):
+    if name == "PINNED_BOT":
+        return get_required_telegram_target()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 STATE_DIR = Path(os.environ.get("DSH_RELAY_STATE_DIR") or str(Path(__file__).resolve().parent.parent / "state"))
 RESULT_STATE_FILE = STATE_DIR / "w3_result_state.json"
@@ -103,14 +112,17 @@ class ReadOnlyTelegramSession:
         await self._stdio_cm.__aexit__(*exc)
 
 
-async def mcp_get_history(session: ClientSession, limit: int = 50) -> dict:
-    result = await session.call_tool("get_history", {"bot": PINNED_BOT, "limit": limit})
+async def mcp_get_history(session: ClientSession, limit: int = 50, bot: str | None = None) -> dict:
+    target_bot = bot or get_required_telegram_target()
+    result = await session.call_tool("get_history", {"bot": target_bot, "limit": limit})
     return json.loads(result.content[0].text)
 
 
 async def run(repo: str, issue: int, correlation_id: str, result_store: ResultStateStore,
               expected_task_id: str | None, history_limit: int,
-              task_branch: str | None, result_commit: str | None, published_head: str | None) -> int:
+              task_branch: str | None, result_commit: str | None, published_head: str | None,
+              bot: str | None = None) -> int:
+    target_bot = bot or get_required_telegram_target()
     entry = result_store.get(repo, issue, correlation_id)
     if entry is None:
         print(f"LATE SETTLEMENT: NO_ENTRY (no prior dispatch/result state for {repo}#{issue}#{correlation_id})")
@@ -125,10 +137,10 @@ async def run(repo: str, issue: int, correlation_id: str, result_store: ResultSt
         return 1
 
     async with ReadOnlyTelegramSession() as session:
-        history = await mcp_get_history(session, limit=history_limit)
+        history = await mcp_get_history(session, limit=history_limit, bot=target_bot)
 
     outcome, updated_entry, reason = attempt_late_settlement(
-        result_store, repo, issue, correlation_id, history, PINNED_BOT,
+        result_store, repo, issue, correlation_id, history, target_bot,
         expected_task_id=expected_task_id,
     )
     print(f"LATE SETTLEMENT: {outcome} ({reason})")
@@ -140,6 +152,7 @@ async def run(repo: str, issue: int, correlation_id: str, result_store: ResultSt
         comment = build_late_settlement_comment(
             correlation_id, updated_entry,
             task_branch=task_branch, result_commit=result_commit, published_head=published_head,
+            bot_username=target_bot,
         )
         gh_comment_issue(repo, issue, comment)
         result_store.mark_late_comment_posted(repo, issue, correlation_id)
@@ -165,6 +178,12 @@ def main() -> int:
     ap.add_argument("--published-head", default=None,
                      help="independently-verified evidence only; never parsed from Telegram text or model prose")
     args = ap.parse_args()
+
+    try:
+        get_required_telegram_target()
+    except TelegramTargetError as e:
+        print(f"CONFIG ERROR: {e}")
+        return 1
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     result_store = ResultStateStore(RESULT_STATE_FILE)

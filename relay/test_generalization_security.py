@@ -30,7 +30,13 @@ from contract_v3 import (
 )
 from issue_identity import IssueIdentityStore, NEW, RESUME, PAYLOAD_MUTATED
 from state_machine import DispatchStateStore, TransitionDenied, RESERVED, COMPLETED, SENT
-from dispatch_v3 import _get_allowed_authors, _get_pinned_bot
+from target import get_required_telegram_target, TelegramTargetError
+from result_collector import ResultStateStore
+from late_settlement import attempt_late_settlement
+from dispatch_v3 import (
+    _get_allowed_authors, _get_pinned_bot,
+    run as dispatch_v3_run, mcp_get_history, mcp_send_message,
+)
 
 
 VALID_SINGLE_BODY = """\
@@ -202,12 +208,95 @@ def test_deployment_template_workflow_static_contract():
     assert "windows" in content
 
 
-def test_configured_telegram_target_used(monkeypatch):
-    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "@MyPrivateDshBot")
+def test_configured_telegram_target_accepted(monkeypatch):
+    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "MyPrivateDshBot")
+    assert get_required_telegram_target() == "MyPrivateDshBot"
     assert _get_pinned_bot() == "MyPrivateDshBot"
 
-    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "DirectBotName")
-    assert _get_pinned_bot() == "DirectBotName"
+
+def test_telegram_target_with_leading_at_normalized(monkeypatch):
+    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "@MyPrivateDshBot")
+    assert get_required_telegram_target() == "MyPrivateDshBot"
+    assert _get_pinned_bot() == "MyPrivateDshBot"
+
+    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "  @LeadingAndTrailingBot  ")
+    assert get_required_telegram_target() == "LeadingAndTrailingBot"
+    assert _get_pinned_bot() == "LeadingAndTrailingBot"
+
+
+def test_missing_telegram_target_fails_closed(monkeypatch):
+    monkeypatch.delenv("DSH_RELAY_TELEGRAM_TARGET", raising=False)
+    with pytest.raises(TelegramTargetError) as excinfo:
+        get_required_telegram_target()
+    assert "DSH_RELAY_TELEGRAM_TARGET is required" in str(excinfo.value)
+
+    with pytest.raises(TelegramTargetError):
+        _get_pinned_bot()
+
+
+def test_empty_telegram_target_fails_closed(monkeypatch):
+    monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", "")
+    with pytest.raises(TelegramTargetError) as excinfo:
+        get_required_telegram_target()
+    assert "DSH_RELAY_TELEGRAM_TARGET is required" in str(excinfo.value)
+
+    with pytest.raises(TelegramTargetError):
+        _get_pinned_bot()
+
+
+def test_whitespace_telegram_target_fails_closed(monkeypatch):
+    for ws in ["   ", "\t", "\n", " \t \n "]:
+        monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", ws)
+        with pytest.raises(TelegramTargetError) as excinfo:
+            get_required_telegram_target()
+        assert "DSH_RELAY_TELEGRAM_TARGET is required" in str(excinfo.value)
+
+        with pytest.raises(TelegramTargetError):
+            _get_pinned_bot()
+
+
+def test_at_only_telegram_target_fails_closed(monkeypatch):
+    for invalid in ["@", " @ ", "  @  ", "@@"]:
+        monkeypatch.setenv("DSH_RELAY_TELEGRAM_TARGET", invalid)
+        with pytest.raises(TelegramTargetError):
+            get_required_telegram_target()
+
+
+@pytest.mark.asyncio
+async def test_no_telegram_transport_called_when_target_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("DSH_RELAY_TELEGRAM_TARGET", raising=False)
+
+    class ExplodingSession:
+        async def call_tool(self, name, args):
+            raise AssertionError(f"call_tool({name}) must NEVER be called when target is missing!")
+
+    # 1. mcp_get_history must fail before calling any tool
+    with pytest.raises(TelegramTargetError):
+        await mcp_get_history(ExplodingSession(), limit=20)
+
+    # 2. mcp_send_message must fail before calling any tool
+    with pytest.raises(TelegramTargetError):
+        await mcp_send_message(ExplodingSession(), "command")
+
+    # 3. late settlement must fail before inspecting candidates or store
+    result_store = ResultStateStore(tmp_path / "result.json")
+    with pytest.raises(TelegramTargetError):
+        attempt_late_settlement(result_store, "test-repo", 1, "corr", {"messages": []})
+
+    # 4. dispatch_v3.run must fail before reservation or transport
+    dispatch_store = DispatchStateStore(tmp_path / "dispatch.json")
+    parsed = parse_and_validate(
+        "[DSH-TASK] test",
+        VALID_SINGLE_BODY,
+        required_title_prefix="[DSH-TASK]",
+        author="alice",
+        expected_author={"alice"},
+    )
+    with pytest.raises(TelegramTargetError):
+        await dispatch_v3_run("test-repo", 1, parsed, dispatch_store, result_store)
+
+    # Prove no reservation was made
+    assert dispatch_store.get_status("test-repo", 1, parsed.correlation_id) is None
 
 
 def test_issue_supplied_destination_override_rejected():

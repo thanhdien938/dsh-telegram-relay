@@ -41,6 +41,7 @@ from state_machine import (  # noqa: E402
     DispatchStateStore, TransitionDenied, classify_send_result,
     SENT, COMPLETED, FAILED_RETRYABLE, FAILED_TERMINAL,
 )
+from target import get_required_telegram_target, TelegramTargetError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Frozen W1 contract
@@ -76,7 +77,18 @@ REQUIRED_TITLE_PREFIX = (
 REQUIRED_SCHEMA = "p18-w1-canary/v1"
 REQUIRED_PROBE = "aliases"
 FIXED_TELEGRAM_COMMAND = "/aliases"
-PINNED_BOT = os.environ.get("DSH_RELAY_TELEGRAM_TARGET", "dsh_relay_bot").strip().lstrip("@")
+
+
+def _get_pinned_bot() -> str:
+    return get_required_telegram_target()
+
+
+def __getattr__(name: str):
+    if name == "PINNED_BOT":
+        return get_required_telegram_target()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
 ALLOWED_BODY_FIELDS = {"schema", "probe", "correlation_id"}
 
 STATE_DIR = Path(os.environ.get("DSH_RELAY_STATE_DIR") or str(Path(__file__).resolve().parent.parent / "state"))
@@ -186,7 +198,8 @@ def validate_issue(issue: dict, repo: str) -> dict:
 # MCP / Telegram (unmodified upstream telegram-mcp over real MCP stdio)
 # ---------------------------------------------------------------------------
 
-async def mcp_send_and_get_history(command: str, timeout: int = 45) -> tuple[dict, dict]:
+async def mcp_send_and_get_history(command: str, timeout: int = 45, bot: str | None = None) -> tuple[dict, dict]:
+    target_bot = bot or get_required_telegram_target()
     sub_env = dict(os.environ)
     if TELEGRAM_ENV_PATH:
         sub_env["TELEGRAM_ENV_PATH"] = TELEGRAM_ENV_PATH
@@ -198,15 +211,16 @@ async def mcp_send_and_get_history(command: str, timeout: int = 45) -> tuple[dic
         async with ClientSession(read, write) as session:
             await session.initialize()
             send_result = await session.call_tool(
-                "send_message", {"bot": PINNED_BOT, "message": command, "timeout": timeout},
+                "send_message", {"bot": target_bot, "message": command, "timeout": timeout},
             )
             send_payload = json.loads(send_result.content[0].text)
-            history_result = await session.call_tool("get_history", {"bot": PINNED_BOT, "limit": 10})
+            history_result = await session.call_tool("get_history", {"bot": target_bot, "limit": 10})
             history_payload = json.loads(history_result.content[0].text)
     return send_payload, history_payload
 
 
-def build_evidence_comment(correlation_id: str, send_payload: dict, history_ok: bool) -> str:
+def build_evidence_comment(correlation_id: str, send_payload: dict, history_ok: bool, bot: str | None = None) -> str:
+    target_bot = bot or get_required_telegram_target()
     telegram_send = "PASS" if send_payload.get("status") in ("ok", "timeout") else "FAIL"
     dsh_reply = "PASS" if send_payload.get("reply") else "FAIL"
     mcp_hist = "PASS" if history_ok else "FAIL"
@@ -215,7 +229,7 @@ def build_evidence_comment(correlation_id: str, send_payload: dict, history_ok: 
         f"P18-W1 RELAY CANARY (AUTOMATIC): {overall}\n"
         f"correlation_id: {correlation_id}\n"
         f"probe: {REQUIRED_PROBE}\n"
-        f"target: @{PINNED_BOT}\n"
+        f"target: @{target_bot}\n"
         f"telegram_send: {telegram_send}\n"
         f"dsh_bot_reply: {dsh_reply}\n"
         f"mcp_get_history: {mcp_hist}\n"
@@ -236,10 +250,16 @@ def main() -> int:
         print("CONFIG ERROR: --repo must be provided or GITHUB_REPOSITORY environment variable set")
         return 1
 
+    try:
+        pinned_bot = get_required_telegram_target()
+    except TelegramTargetError as e:
+        print(f"CONFIG ERROR: {e}")
+        return 1
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     store = DispatchStateStore(STATE_FILE)
 
-    print(f"TARGET_PINNED: @{PINNED_BOT}")
+    print(f"TARGET_PINNED: @{pinned_bot}")
 
     try:
         issue = gh_view_issue(args.repo, args.issue)
